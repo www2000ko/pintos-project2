@@ -25,38 +25,25 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
-char *args[MAXARG];
-int argc;
 tid_t
 process_execute (const char *argv) 
 {
   char *fn_copy;
   tid_t tid;
   
-  
-  char *token, *save_ptr;
-  int i;
-  for (token = strtok_r (argv, " ", &save_ptr),i=0; token != NULL;
-        token = strtok_r (NULL, " ", &save_ptr),i++)
-  {
-      args[i]=token;
-      argc++;
-      printf("%sEND\n",args[i]);
-  }
-  printf("%d\n",argc);
+  char * filename,*save_ptr;
+  filename=strtok_r (argv, " ", &save_ptr);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
   if (fn_copy == NULL)
     return TID_ERROR;
-  strlcpy (fn_copy, args[0], PGSIZE);
-  //strlcpy (fn_copy, argv, PGSIZE);
+  strlcpy (fn_copy, argv, PGSIZE);
   
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (args[0], PRI_MAX, start_process, fn_copy);
+  tid = thread_create (filename, PRI_MAX, start_process, fn_copy);
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy);
-  //printf("OK2"); 
+    palloc_free_page (fn_copy); 
   return tid;
 }
 
@@ -66,29 +53,44 @@ process_execute (const char *argv)
 static void
 start_process (void *file_name_)
 {
-  printf("OK process\n");
   char *file_name = file_name_;
   struct intr_frame if_;
   bool success;
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
-  printf("OK process6\n");
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  printf("OK process7\n");
-  printf("%sEND",file_name);
-  success = load (file_name, &if_.eip, &if_.esp);
-  printf("OK process5\n");
+  char *filename,*save_ptr;
+  filename = strtok_r(file_name," ",&save_ptr);
+  success = load (filename, &if_.eip, &if_.esp);
+
+  char *esp=(char *)if_.esp;
+  char *arg[512];
+  int argc=0;
+  char *token;
+  for (token = strtok_r (NULL, " ", &save_ptr); token != NULL;token = strtok_r (NULL, " ", &save_ptr))
+  {
+    esp-=strlen(token)+1;
+    strlcpy(esp,token,strlen(token)+1);
+    arg[argc++]=esp;
+  }
+  esp=esp-(int)esp%4;
+  int i;
+  for(i=argc;i>=0;i--){
+    esp=esp-4;
+    strlcpy(esp,arg[i],4);
+  }
+  strlcpy(esp,arg,4);
+  esp=esp-4;
+  strlcpy(esp,argc,4);
+  if_.esp=esp;
   /* If load failed, quit. */
   palloc_free_page (file_name);
-  printf("OK process4\n");
   if (!success){
-    printf("OK process3\n");
     thread_exit ();
   }
-    
-  printf("OK process2\n");
+
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -133,6 +135,7 @@ process_exit (void)
          directory before destroying the process's page
          directory, or our active page directory will be one
          that's been freed (and cleared). */
+      printf("%s:exit(%d)\n",cur->name,cur->ret);
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
@@ -237,23 +240,18 @@ load (const char *file_name, void (**eip) (void), void **esp)
   off_t file_ofs;
   bool success = false;
   int i;
-  printf("OK load\n");
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
   if (t->pagedir == NULL) 
     goto done;
   process_activate ();
-  printf("OK load1\n");
   /* Open executable file. */
-  printf("%sEND\n",file_name);
   file = filesys_open (file_name);
-  printf("OK load7\n");
   if (file == NULL) 
     {
       printf ("load: %s: open failed\n", file_name);
       goto done; 
     }
-  printf("OK load2\n");
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
       || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
@@ -266,7 +264,6 @@ load (const char *file_name, void (**eip) (void), void **esp)
       printf ("load: %s: error loading executable\n", file_name);
       goto done; 
     }
-  printf("OK load3\n");
   /* Read program headers. */
   file_ofs = ehdr.e_phoff;
   for (i = 0; i < ehdr.e_phnum; i++) 
@@ -325,16 +322,13 @@ load (const char *file_name, void (**eip) (void), void **esp)
           break;
         }
     }
-  printf("OK load4\n");
   /* Set up stack. */
   if (!setup_stack (esp))
     goto done;
-  printf("OK load5\n");
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
 
   success = true;
-  printf("OK load6\n");
  done:
   /* We arrive here whether the load is successful or not. */
   file_close (file);
@@ -455,7 +449,6 @@ static bool
 setup_stack (void **esp) 
 {
   uint8_t *kpage;
-  printf("OK stack");
   bool success = false;
   kpage = palloc_get_page (PAL_USER | PAL_ZERO);
   if (kpage != NULL) 
@@ -464,19 +457,10 @@ setup_stack (void **esp)
       if (success)
       {
         *esp = PHYS_BASE;
-        *esp=*esp-1;
-        hex_dump (0, *esp, 16, true);
-        /*char *token;
-        for(token=args[0];token!=NULL;token=token+1)
-        {
-          *esp=*esp-1;
-          printf("0x%x %x\n",*esp,esp);
-        }*/
       }
       else
         palloc_free_page (kpage);
     }
-    printf("OK stack2");
   return success;
 }
 
